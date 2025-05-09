@@ -1,0 +1,282 @@
+//=====[Libraries]=============================================================
+
+#include "mbed.h"
+#include "arm_book_lib.h"
+
+//=====[Declaration and initialization of public global objects]===============
+
+DigitalIn enterButton(BUTTON1);
+DigitalIn gasDetectorButton(D2);
+DigitalIn overTempDetectorButton(D3);
+DigitalIn aButton(D4);
+DigitalIn bButton(D5);
+DigitalIn cButton(D6);
+DigitalIn dButton(D7);
+
+DigitalOut alarmLed(LED1);
+DigitalOut incorrectCodeLed(LED3);
+DigitalOut systemBlockedLed(LED2);
+
+// New outputs to indicate gas and temperature states
+bool gasDetectorState = OFF;
+bool overTempDetectorState = OFF;
+
+// Analog input for temperature sensor simulation
+AnalogIn temperatureSensor(A0);
+
+UnbufferedSerial uartUsb(USBTX, USBRX, 115200);
+
+// Timer for regular status updates
+Timer statusTimer;
+
+//=====[Declaration and initialization of public global variables]=============
+
+bool alarmState = OFF;
+int numberOfIncorrectCodes = 0;
+const int STATUS_UPDATE_INTERVAL_MS = 6000; // Status update every 6 seconds
+float currentTemperature = 25.0; // Default room temperature in Celsius
+
+//=====[Declarations (prototypes) of public functions]=========================
+
+void inputsInit();
+void outputsInit();
+
+void alarmActivationUpdate();
+void alarmDeactivationUpdate();
+void detectorStateUpdate();
+void readTemperatureSensor();
+void sendContinuousStatusUpdate();
+
+void uartTask();
+void availableCommands();
+void sendCompleteStatusReport();
+void sendGasDetectorState();
+void sendOverTempDetectorState();
+void sendAlarmState();
+void sendTemperatureReading();
+
+//=====[Main function, the program entry point after power on or reset]========
+
+int main()
+{
+    inputsInit();
+    outputsInit();
+    statusTimer.start();
+    
+    while (true) {
+        detectorStateUpdate();
+        readTemperatureSensor();
+        alarmActivationUpdate();
+        alarmDeactivationUpdate();
+        sendContinuousStatusUpdate();
+        uartTask();
+        
+        // Add a short delay to slow down the loop execution
+        ThisThread::sleep_for(100ms);
+    }
+}
+
+//=====[Implementations of public functions]===================================
+
+void inputsInit()
+{
+    gasDetectorButton.mode(PullDown);
+    overTempDetectorButton.mode(PullDown);
+    aButton.mode(PullDown);
+    bButton.mode(PullDown);
+    cButton.mode(PullDown);
+    dButton.mode(PullDown);
+}
+
+void outputsInit()
+{
+    alarmLed = OFF;
+    incorrectCodeLed = OFF;
+    systemBlockedLed = OFF;
+    gasDetectorState = OFF;
+    overTempDetectorState = OFF;
+}
+
+// Simulate reading from a temperature sensor using analog input
+void readTemperatureSensor()
+{
+    // Read the analog value and convert to temperature
+    // Assuming the analog input range 0-1 maps to 0-100°C
+    float sensorValue = temperatureSensor.read();
+    currentTemperature = sensorValue * 100.0;
+    
+    // Alternatively, simulate temperature changes for testing
+    // Uncomment this line and comment out the lines above to use simulation
+    // currentTemperature = 25.0 + 15.0 * sin(statusTimer.elapsed_time().count() / 5000000.0);
+}
+
+// Send continuous status updates to PC
+void sendContinuousStatusUpdate()
+{
+    if (statusTimer.elapsed_time() > 6s) {
+        sendCompleteStatusReport();
+        statusTimer.reset();
+    }
+}
+
+// New function to update detector states based on button presses
+void detectorStateUpdate()
+{
+    static bool gasDetectorButtonPrevState = OFF;
+    static bool overTempDetectorButtonPrevState = OFF;
+    
+    // Check for rising edge on gas detector button (D2)
+    if (gasDetectorButton && !gasDetectorButtonPrevState) {
+        gasDetectorState = !gasDetectorState;  // Toggle the state
+    }
+    gasDetectorButtonPrevState = gasDetectorButton;
+    
+    // Check for rising edge on over temperature detector button (D3)
+    if (overTempDetectorButton && !overTempDetectorButtonPrevState) {
+        overTempDetectorState = !overTempDetectorState;  // Toggle the state
+    }
+    overTempDetectorButtonPrevState = overTempDetectorButton;
+}
+
+void alarmActivationUpdate()
+{
+    if (gasDetectorState || overTempDetectorState || currentTemperature > 50.0) {
+        alarmState = ON;
+    }
+    alarmLed = alarmState;
+}
+
+void alarmDeactivationUpdate()
+{
+    if (numberOfIncorrectCodes < 5) {
+        if (aButton && bButton && cButton && dButton && !enterButton) {
+            incorrectCodeLed = OFF;
+        }
+        if (enterButton && !incorrectCodeLed && alarmState) {
+            if (aButton && bButton && !cButton && !dButton) {
+                alarmState = OFF;
+                numberOfIncorrectCodes = 0;
+            } else {
+                incorrectCodeLed = ON;
+                numberOfIncorrectCodes = numberOfIncorrectCodes + 1;
+            }
+        }
+    } else {
+        systemBlockedLed = ON;
+    }
+}
+
+void sendCompleteStatusReport()
+{
+    char buffer[100];
+    
+    uartUsb.write("\r\n========= SYSTEM STATUS REPORT =========\r\n", 43);
+    
+    // Report alarm state
+    if (alarmState) {
+        uartUsb.write("* ALARM: ACTIVATED\r\n", 20);
+    } else {
+        uartUsb.write("* ALARM: NOT ACTIVATED\r\n", 24);
+    }
+    
+    // Report gas detector state
+    if (gasDetectorState) {
+        uartUsb.write("* GAS DETECTOR: ON (Gas detected!)\r\n", 35);
+    } else {
+        uartUsb.write("* GAS DETECTOR: OFF (No gas detected)\r\n", 38);
+    }
+    
+    // Report over temperature detector state
+    if (overTempDetectorState) {
+        uartUsb.write("* OVER TEMP DETECTOR: ON (Over temperature!)\r\n", 46);
+    } else {
+        uartUsb.write("* OVER TEMP DETECTOR: OFF (Temperature normal)\r\n", 49);
+    }
+    
+    // Report temperature reading
+    sprintf(buffer, "* TEMPERATURE: %.1f°C", currentTemperature);
+    uartUsb.write(buffer, strlen(buffer));
+    
+    if (currentTemperature > 50.0) {
+        uartUsb.write(" (HIGH!)\r\n", 10);
+    } else if (currentTemperature < 10.0) {
+        uartUsb.write(" (LOW!)\r\n", 9);
+    } else {
+        uartUsb.write(" (Normal)\r\n", 11);
+    }
+    
+    // Report system status
+    if (systemBlockedLed) {
+        uartUsb.write("* SYSTEM: BLOCKED (Too many incorrect codes)\r\n", 46);
+    } else {
+        uartUsb.write("* SYSTEM: NORMAL\r\n", 19);
+    }
+    
+    uartUsb.write("=========================================\r\n\r\n", 44);
+}
+
+void sendGasDetectorState()
+{
+    if (gasDetectorState) {
+        uartUsb.write("Gas detected! Detector state: ON\r\n", 33);
+    } else {
+        uartUsb.write("No gas detected. Detector state: OFF\r\n", 38);
+    }
+}
+
+void sendOverTempDetectorState()
+{
+    if (overTempDetectorState) {
+        uartUsb.write("Over temperature detected! Detector state: ON\r\n", 47);
+    } else {
+        uartUsb.write("Temperature normal. Detector state: OFF\r\n", 41);
+    }
+}
+
+void sendAlarmState()
+{
+    if (alarmState) {
+        uartUsb.write("The alarm is ACTIVATED\r\n", 24);
+    } else {
+        uartUsb.write("The alarm is NOT ACTIVATED\r\n", 28);
+    }
+}
+
+void sendTemperatureReading()
+{
+    char buffer[50];
+    sprintf(buffer, "Current temperature: %.1f°C\r\n", currentTemperature);
+    uartUsb.write(buffer, strlen(buffer));
+}
+
+void uartTask()
+{
+    char receivedChar = '\0';
+    if (uartUsb.readable()) {
+        uartUsb.read(&receivedChar, 1);
+        if (receivedChar == '1') {
+            sendAlarmState();
+        } else if (receivedChar == '2') {
+            sendGasDetectorState();
+        } else if (receivedChar == '3') {
+            sendOverTempDetectorState();
+        } else if (receivedChar == '4') {
+            sendTemperatureReading();
+        } else if (receivedChar == '5') {
+            sendCompleteStatusReport();
+        } else {
+            availableCommands();
+        }
+    }
+}
+
+void availableCommands()
+{
+    uartUsb.write("Available commands:\r\n", 21);
+    uartUsb.write("Press '1' to get the alarm state\r\n", 34);
+    uartUsb.write("Press '2' to get the gas detector state\r\n", 42);
+    uartUsb.write("Press '3' to get the over temperature detector state\r\n", 53);
+    uartUsb.write("Press '4' to get the current temperature reading\r\n", 50);
+    uartUsb.write("Press '5' to get a complete system status report\r\n\r\n", 54);
+    uartUsb.write("Note: Full status report is automatically sent every 6 seconds\r\n", 60);
+}
